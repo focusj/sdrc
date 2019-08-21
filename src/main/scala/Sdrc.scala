@@ -7,7 +7,7 @@ import com.typesafe.config.{Config, ConfigFactory}
 import org.mongodb.scala.bson.BsonTimestamp
 import org.mongodb.scala.bson.collection.Document
 import org.mongodb.scala.model.Filters._
-import org.mongodb.scala.{MongoClient, MongoDatabase, Observer}
+import org.mongodb.scala.{MongoClient, MongoDatabase, Observable, Observer}
 
 import scala.collection.JavaConverters._
 import scala.concurrent.ExecutionContext.Implicits._
@@ -15,21 +15,12 @@ import scala.concurrent.Future
 import scala.util.{Failure, Success}
 
 trait MongoComponent {
-  def db(): MongoDatabase
-}
+  val uri: String
+  val database: String
 
-trait CursorMongo extends MongoComponent with Configurable {
-  def db(): MongoDatabase = {
-    val client = MongoClient("mongodb://127.0.0.1")
-    client.getDatabase(config().getString("collector.cursor.mongo"))
-  }
-}
+  def client(): MongoClient = MongoClient(uri)
 
-trait OplogMongo extends MongoComponent with Configurable {
-  def db(): MongoDatabase = {
-    val client = MongoClient("mongodb://127.0.0.1")
-    client.getDatabase(config().getString("collector.oplog.mongo"))
-  }
+  def db(): MongoDatabase = client().getDatabase(database)
 }
 
 trait CursorManager {
@@ -59,8 +50,10 @@ case class OplogConf(after: BsonTimestamp, ops: List[String])
 
 case class Oplog(op: String)
 
-class MongoCollector {
-  this: MongoComponent with CursorManager with Configurable =>
+trait MongoOplogCollector {
+  this: MongoComponent with Configurable =>
+
+  val cursorManager: CursorManager
 
   private val coll = db().getCollection("oplog.rs")
 
@@ -70,8 +63,8 @@ class MongoCollector {
   }
 
 
-  def run() = {
-    getCursor.map(cursor => {
+  def run(): Future[Observable[Oplog]] = {
+    cursorManager.getCursor.map(cursor => {
       val ops = config().getStringList("collector.ops").asScala
       val query = and(
         gt("ts", cursor),
@@ -89,14 +82,20 @@ class MongoCollector {
   }
 }
 
-object Sdrc extends App {
-  val mongo: MongoClient = MongoClient("mongodb://127.0.0.1")
+object Sdrc extends App with Configurable {
 
-  val cursorManager = new {} with CursorManager with CursorMongo
-  val mongoCollector = new {} with MongoCollector with OplogMongo with CursorManager with Configurable
+  val cursorManager: CursorManager = new {
+    val uri: String = "mongodb://127.0.0.1"
+    val database: String = config().getString("collector.cursor.mongo")
+  } with CursorManager with MongoComponent with Configurable
 
+  val mongoOplogCollector: MongoOplogCollector = new {
+    val uri: String = "mongodb://127.0.0.1"
+    val database: String = config().getString("collector.oplog.mongo")
+    val cursorManager = this.cursorManager
+  } with MongoOplogCollector with MongoComponent with Configurable
 
-  val oplogObs = mongoCollector.run()
+  val oplogObs = mongoOplogCollector.run()
 
   oplogObs.onComplete({
     case Success(oplogs)    =>
@@ -110,7 +109,6 @@ object Sdrc extends App {
     case Failure(exception) =>
       print(exception)
   })
-
 
   val latch = new CountDownLatch(1)
   latch.await()
