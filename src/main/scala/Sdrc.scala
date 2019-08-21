@@ -65,7 +65,7 @@ trait MongoOplogCollector {
 
   def run(): Future[Observable[Oplog]] = {
     cursorManager.getCursor.map(cursor => {
-      val ops = config().getStringList("collector.ops").asScala
+      val ops = config().getStringList("sdrc.collector.mongo.ops").asScala
       val query = and(
         gt("ts", cursor),
         in("op", ops: _*),
@@ -85,13 +85,13 @@ trait MongoOplogCollector {
 object Sdrc extends App with Configurable {
 
   val cursorManager: CursorManager = new {
-    val uri: String = "mongodb://127.0.0.1"
-    val database: String = config().getString("collector.cursor.mongo")
+    val uri: String = config().getString("sdrc.cursor.mongo.uri")
+    val database: String = config().getString("sdrc.cursor.mongo.database")
   } with CursorManager with MongoComponent with Configurable
 
   val mongoOplogCollector: MongoOplogCollector = new {
-    val uri: String = "mongodb://127.0.0.1"
-    val database: String = config().getString("collector.oplog.mongo")
+    val uri: String = config().getString("sdrc.collector.mongo.uri")
+    val database: String = config().getString("sdrc.collector.mongo.database")
     val cursorManager = this.cursorManager
   } with MongoOplogCollector with MongoComponent with Configurable
 
