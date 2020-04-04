@@ -1,46 +1,12 @@
-import java.time.Instant
-import java.time.temporal.ChronoUnit
 import java.util.concurrent.CountDownLatch
 
-import com.mongodb.CursorType
 import com.typesafe.config.{Config, ConfigFactory}
+import org.mongodb.scala.Observer
 import org.mongodb.scala.bson.BsonTimestamp
-import org.mongodb.scala.bson.collection.Document
-import org.mongodb.scala.model.Filters._
-import org.mongodb.scala.{MongoClient, MongoDatabase, Observable, Observer}
 
 import scala.collection.JavaConverters._
 import scala.concurrent.ExecutionContext.Implicits._
-import scala.concurrent.Future
-import scala.util.{Failure, Success}
 
-trait MongoComponent {
-  val uri: String
-  val database: String
-
-  def client(): MongoClient = MongoClient(uri)
-
-  def db(): MongoDatabase = client().getDatabase(database)
-}
-
-trait CursorManager {
-  this: MongoComponent =>
-
-  private val coll = db().getCollection("cursor")
-
-  def getCursor: Future[BsonTimestamp] = {
-    coll.find().headOption().map {
-      case Some(v) =>
-        BsonTimestamp(v.getInteger("time"), v.getInteger("inc"))
-      case None    =>
-        BsonTimestamp(Instant.now().getEpochSecond.toInt, 0)
-    }
-  }
-
-  def updateCursor(time: Int, inc: Int): Unit = {
-    coll.updateOne(Document(), Document("time" -> time, "inc" -> inc))
-  }
-}
 
 trait Configurable {
   def config(): Config = ConfigFactory.load("sdrc")
@@ -48,68 +14,42 @@ trait Configurable {
 
 case class OplogConf(after: BsonTimestamp, ops: List[String])
 
-case class Oplog(op: String)
-
-trait MongoOplogCollector {
-  this: MongoComponent with Configurable =>
-
-  val cursorManager: CursorManager
-
-  private val coll = db().getCollection("oplog.rs")
-
-  private def trans(doc: Document) = {
-    print(doc)
-    Oplog("op")
-  }
-
-
-  def run(): Future[Observable[Oplog]] = {
-    cursorManager.getCursor.map(cursor => {
-      val ops = config().getStringList("sdrc.collector.mongo.ops").asScala
-      val query = and(
-        gt("ts", cursor),
-        in("op", ops: _*),
-
-        exists("fromMigrate", exists = false)
-      )
-      coll.find(query)
-          .oplogReplay(true)
-          .cursorType(CursorType.Tailable)
-          .noCursorTimeout(true)
-          .map(trans)
-    })
-
-  }
-}
+case class Oplog(op: String /*, ns: String, ts: Long, doc: Map[String, Object]*/)
 
 object Sdrc extends App with Configurable {
 
   val cursorManager: CursorManager = new {
     val uri: String = config().getString("sdrc.cursor.mongo.uri")
     val database: String = config().getString("sdrc.cursor.mongo.database")
-  } with CursorManager with MongoComponent with Configurable
+  } with CursorManager with Mongoable with Configurable
+
+  val kafkaBroker: KafkaBroker = new {
+    override val topic: String = ""
+    override val kafkaHost: String = ""
+  } with KafkaBroker
 
   val mongoOplogCollector: MongoOplogCollector = new {
     val uri: String = config().getString("sdrc.collector.mongo.uri")
     val database: String = config().getString("sdrc.collector.mongo.database")
     val cursorManager = this.cursorManager
-  } with MongoOplogCollector with MongoComponent with Configurable
+    val kafkaBroker = this.kafkaBroker
+  } with MongoOplogCollector with Mongoable with Configurable
 
-  val oplogObs = mongoOplogCollector.run()
+  cursorManager.get.map(cursor => {
+    val ops = config().getStringList("sdrc.collector.mongo.ops").asScala
+    val oplogs = mongoOplogCollector.run(cursor, ops)
+    oplogs.subscribe(new Observer[Oplog] {
+      override def onNext(oplog: Oplog): Unit =
+      //kafkaBroker.push(oplog)
+        println(oplog)
 
-  oplogObs.onComplete({
-    case Success(oplogs)    =>
-      oplogs.subscribe(new Observer[Oplog] {
-        override def onNext(result: Oplog): Unit = println(result)
+      override def onError(e: Throwable): Unit =
+        println(e)
 
-        override def onError(e: Throwable): Unit = println(e)
-
-        override def onComplete(): Unit = print("done")
-      })
-    case Failure(exception) =>
-      print(exception)
+      override def onComplete(): Unit =
+        print("done")
+    })
   })
-
   val latch = new CountDownLatch(1)
   latch.await()
 }
