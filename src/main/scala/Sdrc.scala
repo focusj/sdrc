@@ -2,11 +2,10 @@ import java.util.concurrent.CountDownLatch
 
 import com.typesafe.config.{Config, ConfigFactory}
 import org.mongodb.scala.Observer
-import org.mongodb.scala.bson.BsonTimestamp
+import org.mongodb.scala.bson.{BsonDocument, BsonTimestamp}
 
 import scala.collection.JavaConverters._
 import scala.concurrent.ExecutionContext.Implicits._
-
 
 trait Configurable {
   def config(): Config = ConfigFactory.load("sdrc")
@@ -14,7 +13,7 @@ trait Configurable {
 
 case class OplogConf(after: BsonTimestamp, ops: List[String])
 
-case class Oplog(op: String /*, ns: String, ts: Long, doc: Map[String, Object]*/)
+case class Oplog(op: String, ns: String, ts: Long, doc: BsonDocument)
 
 object Sdrc extends App with Configurable {
 
