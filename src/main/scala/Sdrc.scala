@@ -39,8 +39,8 @@ object Sdrc extends App with Configurable {
     val oplogs = mongoOplogCollector.run(cursor, ops)
     oplogs.subscribe(new Observer[Oplog] {
       override def onNext(oplog: Oplog): Unit =
-      //kafkaBroker.push(oplog)
-        println(oplog)
+        
+        kafkaBroker.push(oplog)
 
       override def onError(e: Throwable): Unit =
         println(e)
