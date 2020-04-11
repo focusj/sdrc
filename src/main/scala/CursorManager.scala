@@ -1,11 +1,9 @@
-import java.time.Instant
-
 import akka.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors}
 import akka.actor.typed.{ActorRef, Behavior}
-import org.mongodb.scala.MongoDatabase
 import org.mongodb.scala.bson.BsonTimestamp
 import org.mongodb.scala.bson.collection.Document
 import org.mongodb.scala.model.FindOneAndReplaceOptions
+import org.mongodb.scala.{MongoDatabase, Observer}
 
 import scala.concurrent.ExecutionContext.Implicits._
 import scala.concurrent.Future
@@ -37,6 +35,7 @@ class CursorManager(
         val ts = defaultTimestamp
         reply ! Cursor(ts.getValue, ts.getInc)
       case _@Update(ts, inc)           =>
+        context.log.info("update cursor {}, {}", ts, inc)
         update(ts, inc)
     }
     this
@@ -44,9 +43,11 @@ class CursorManager(
 
   private def get: Future[BsonTimestamp] = {
     coll.find(Document("_id" -> 1)).headOption().map {
-      case Some(v) =>
-        BsonTimestamp(v.getInteger("time"), v.getInteger("inc"))
-      case None    =>
+      case Some(doc) =>
+        val ts = doc.getOrElse("time", 0).asNumber().intValue()
+        val inc = doc.getOrElse("inc", 0).asNumber().intValue()
+        BsonTimestamp(ts, inc)
+      case None      =>
         defaultTimestamp
     }
   }
@@ -61,7 +62,13 @@ class CursorManager(
       Document("_id" -> 1),
       Document("time" -> time, "inc" -> inc),
       opt
-    )
+    ).subscribe(new Observer[Document] {
+      override def onNext(result: Document): Unit = context.log.info("update result: {}", result)
+
+      override def onError(e: Throwable): Unit = context.log.error("update failed: {}", e)
+
+      override def onComplete(): Unit = context.log.info("update done")
+    })
   }
 }
 
@@ -71,16 +78,16 @@ object CursorManager {
 
   sealed trait Command
 
-  private case class GetSuccess(cursor: Cursor, reply: ActorRef[Response]) extends Command
-
-  private case class GetFailed(ex: Throwable, reply: ActorRef[Response]) extends Command
+  sealed trait Response
 
   case class Get(reply: ActorRef[Response]) extends Command
 
   case class Update(ts: Long, inc: Int) extends Command
 
-  sealed trait Response
-
   case class Cursor(ts: Long, inc: Int) extends Response
+
+  private case class GetSuccess(cursor: Cursor, reply: ActorRef[Response]) extends Command
+
+  private case class GetFailed(ex: Throwable, reply: ActorRef[Response]) extends Command
 
 }

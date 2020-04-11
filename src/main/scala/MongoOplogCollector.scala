@@ -1,13 +1,18 @@
-import akka.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors}
+import akka.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors, TimerScheduler}
 import akka.actor.typed.{ActorRef, Behavior}
 import com.mongodb.CursorType
 import org.mongodb.scala.bson.collection.Document
 import org.mongodb.scala.bson.{BsonDocument, BsonString, BsonTimestamp}
-import org.mongodb.scala.model.Filters.{and, exists, gt, in}
+import org.mongodb.scala.model.Filters
+import org.mongodb.scala.model.Filters.and
 import org.mongodb.scala.{MongoDatabase, Observable, Observer}
+
+import scala.concurrent.duration._
 
 class MongoOplogCollector(
   db: MongoDatabase,
+  ops: Seq[String],
+  timers: TimerScheduler[MongoOplogCollector.Command],
   cursorActor: ActorRef[CursorManager.Command],
   context: ActorContext[MongoOplogCollector.Command]
 )
@@ -16,6 +21,8 @@ class MongoOplogCollector(
   import MongoOplogCollector._
 
   private val coll = db.getCollection("oplog.rs")
+
+  private var currentCursor: CursorManager.Cursor = _
 
   override def onMessage(
     msg: MongoOplogCollector.Command
@@ -28,22 +35,30 @@ class MongoOplogCollector(
       case _: Stop                 =>
       case _: Suspend              =>
       case _: Resume               =>
+      case _: UpdateCursor         =>
+        cursorActor ! CursorManager.Update(currentCursor.ts, currentCursor.inc)
       case _@WrappedResponse(resp) =>
         val cursor = resp.asInstanceOf[CursorManager.Cursor]
-        val oplogs = init(BsonTimestamp(cursor.ts.toInt, cursor.inc), Seq("i", "u", "d"))
+
+        timers.startTimerAtFixedRate(UpdateCursor(), 1.second)
+
+        val oplogs = init(BsonTimestamp(cursor.ts.toInt, cursor.inc), ops)
+
         oplogs.subscribe(new Observer[Oplog] {
-          override def onNext(result: Oplog): Unit = {
-            context.log.info("{}", result)
+          override def onNext(oplog: Oplog): Unit = {
+            currentCursor = CursorManager.Cursor(oplog.ts.getTime, oplog.ts.getInc)
+            context.log.info("{}", oplog)
           }
 
           override def onError(e: Throwable): Unit = {
             context.log.error("{}", e)
+            // TODO error handling
           }
 
           override def onComplete(): Unit = {
             context.log.info("consuming oplog done")
+            // TODO how to finish
           }
-
         })
     }
 
@@ -53,9 +68,9 @@ class MongoOplogCollector(
 
   def init(from: BsonTimestamp, ops: Seq[String]): Observable[Oplog] = {
     val query = and(
-      gt("ts", from),
-      in("op", ops: _*),
-      exists("fromMigrate", exists = false)
+      Filters.gt("ts", from),
+      Filters.in("op", ops: _*),
+      Filters.exists("fromMigrate", exists = false)
     )
     coll
       .find(query)
@@ -63,6 +78,7 @@ class MongoOplogCollector(
       .cursorType(CursorType.Tailable)
       .noCursorTimeout(true)
       .map(trans)
+      .observeOn(scala.concurrent.ExecutionContext.global)
   }
 
   //  Document(
@@ -75,17 +91,24 @@ class MongoOplogCollector(
   //    (o2,{"_id": {"$numberLong": "6809163828178305548"}}),
   //    (o,{"$set": {"modify_time": {"$date": 1586027165378}}})
   //  )
+  // TODO oplog parse
   private def trans(doc: Document) = {
     val op = doc.get("op").get.asInstanceOf[BsonString]
     val ns = doc.get("ns").get.asInstanceOf[BsonString]
     val ts = doc.get("ts").get.asInstanceOf[BsonTimestamp]
-    val set = doc.get("o").get.asInstanceOf[BsonDocument]
-
-    Oplog(op.getValue, ns.getValue, ts.getValue, set)
+    val obj = doc.get("o").get.asInstanceOf[BsonDocument]
+    val id = null //doc.get("o2").map(_.asInstanceOf[ObjectId]).orNull
+    Oplog(id, op.getValue, ns.getValue, ts, obj)
   }
 }
 
 object MongoOplogCollector {
+
+  def apply(db: MongoDatabase, ops: Seq[String], cursorActor: ActorRef[CursorManager.Command]): Behavior[Command] =
+    Behaviors.withTimers[Command](timers => {
+      Behaviors.setup[Command](context => new MongoOplogCollector(db, ops, timers, cursorActor, context))
+    })
+
 
   sealed trait Command
 
@@ -97,9 +120,8 @@ object MongoOplogCollector {
 
   case class Resume() extends Command
 
-  case class WrappedResponse(resp: CursorManager.Response) extends Command
+  case class UpdateCursor() extends Command
 
-  def apply(db: MongoDatabase, cursorActor: ActorRef[CursorManager.Command]):Behavior[Command] =
-    Behaviors.setup[Command](context => new MongoOplogCollector(db, cursorActor, context))
+  case class WrappedResponse(resp: CursorManager.Response) extends Command
 
 }
