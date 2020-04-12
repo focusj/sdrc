@@ -23,18 +23,18 @@ class CursorManager(
     msg: CursorManager.Command
   ): Behavior[CursorManager.Command] = {
     msg match {
-      case _@Get(reply)                =>
+      case Get(reply)                =>
         context.pipeToSelf(get) {
           case Success(ts) => GetSuccess(Cursor(ts.getValue, ts.getInc), reply)
           case Failure(ex) => GetFailed(ex, reply)
         }
-      case _@GetSuccess(cursor, reply) =>
+      case GetSuccess(cursor, reply) =>
         reply ! cursor
-      case _@GetFailed(ex, reply)      =>
+      case GetFailed(ex, reply)      =>
         context.log.warn("get cursor failed: {}", ex)
         val ts = defaultTimestamp
         reply ! Cursor(ts.getValue, ts.getInc)
-      case _@Update(ts, inc)           =>
+      case Update(ts, inc)           =>
         context.log.info("update cursor {}, {}", ts, inc)
         update(ts, inc)
     }
