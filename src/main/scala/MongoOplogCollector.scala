@@ -1,5 +1,7 @@
+import akka.actor.typed.receptionist.Receptionist
 import akka.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors, TimerScheduler}
 import akka.actor.typed.{ActorRef, Behavior}
+import akka.util.Timeout
 import com.mongodb.CursorType
 import org.bson.BsonObjectId
 import org.mongodb.scala.bson.collection.Document
@@ -12,7 +14,8 @@ import scala.concurrent.duration._
 
 
 class MongoOplogCollector(
-  db: MongoDatabase,
+  oplogDB: MongoDatabase,
+  sourceDB: MongoDatabase,
   ops: Seq[String],
   timers: TimerScheduler[MongoOplogCollector.Command],
   cursorActor: ActorRef[CursorManager.Command],
@@ -22,7 +25,7 @@ class MongoOplogCollector(
 
   import MongoOplogCollector._
 
-  private val coll = db.getCollection("oplog.rs")
+  private val coll = oplogDB.getCollection("oplog.rs")
 
   private var currentCursor: CursorManager.Cursor = _
 
@@ -33,16 +36,32 @@ class MongoOplogCollector(
       context.messageAdapter(msg => WrappedCursorResponse(msg))
     val dumperAdapter: ActorRef[OplogDumper.Response] =
       context.messageAdapter(msg => WrappedDumperResponse(msg))
+    val receptionistAdapter: ActorRef[Receptionist.Listing] =
+      context.messageAdapter(msg => WrappedReceptionistResponse(msg))
+
+    implicit val timeout: Timeout = 3.seconds
 
     msg match {
-      case _: Start                      =>
+      case _: Start                             =>
         cursorActor ! CursorManager.Get(cursorAdapter)
-      case _: Stop                       =>
-      case _: Suspend                    =>
-      case _: Resume                     =>
-      case _: UpdateCursor               =>
+      case _: Stop                              =>
+      case _: Suspend                           =>
+      case _: Resume                            =>
+      case _: UpdateCursor                      =>
         cursorActor ! CursorManager.Update(currentCursor.ts, currentCursor.inc)
-      case _@WrappedCursorResponse(resp) =>
+      case Query(db, coll, id)                  =>
+        val dumperKey = s"${db}.${coll}:${id}"
+        val serviceKey = OplogDumper.DumperServiceKey(dumperKey)
+        context.system.receptionist ! Receptionist.Find(serviceKey, receptionistAdapter)
+      case WrappedReceptionistResponse(listing) =>
+        val key = OplogDumper.DumperServiceKey(listing.key.id)
+        listing.allServiceInstances(key).headOption.foreach(dumper =>
+          dumper ! OplogDumper.Get(dumperAdapter)
+        )
+      case WrappedDumperResponse(data)          =>
+        context.log.info("query data: {}", data)
+
+      case _@WrappedCursorResponse(resp)        =>
         val cursor = resp.asInstanceOf[CursorManager.Cursor]
 
         timers.startTimerAtFixedRate(UpdateCursor(), 1.second)
@@ -52,9 +71,21 @@ class MongoOplogCollector(
         oplogs.subscribe(new Observer[Oplog] {
           override def onNext(oplog: Oplog): Unit = {
             currentCursor = CursorManager.Cursor(oplog.ts.getTime, oplog.ts.getInc)
-            val dumper = context.spawn(OplogDumper(db), idOfDumper(oplog))
+
+            // a dumper is a long lived actor, it should watch by this context
+            // and discovered by this context to get its state.
+            val dumper = context.spawn(OplogDumper(sourceDB), idOfDumper(oplog))
+
+            // watch this dumper
             context.watch(dumper)
+
+            // register this long live dumper
+            // why not use children? TODO
+            context.system.receptionist ! Receptionist.Register(OplogDumper.DumperServiceKey(idOfDumper(oplog)), dumper)
+
             dumper ! OplogDumper.Set(oplog)
+
+            context.self ! Query("sdrc", "test", oplog.id.toHexString)
           }
 
           override def onError(e: Throwable): Unit = {
@@ -100,11 +131,6 @@ class MongoOplogCollector(
     Oplog(idOfOplog(doc), op.getValue, ns.getValue, ts, obj)
   }
 
-  private def nsFilter(doc: Document) = {
-    val ns = doc.get("ns").get.asInstanceOf[BsonString].getValue
-    ns.startsWith("sdrc") // TODO fix this
-  }
-
   private def idOfOplog(doc: Document): ObjectId = {
     context.log.info("{}", doc)
     val o = doc.get("op").get.asInstanceOf[BsonString]
@@ -117,13 +143,18 @@ class MongoOplogCollector(
         throw new IllegalArgumentException(s"not support op: {$op} exception")
     }
   }
+
+  private def nsFilter(doc: Document) = {
+    val ns = doc.get("ns").get.asInstanceOf[BsonString].getValue
+    ns.startsWith("sdrc") // TODO fix this
+  }
 }
 
 object MongoOplogCollector {
 
-  def apply(db: MongoDatabase, ops: Seq[String], cursorActor: ActorRef[CursorManager.Command]): Behavior[Command] =
+  def apply(oplogDB: MongoDatabase, sourceDB: MongoDatabase, ops: Seq[String], cursorActor: ActorRef[CursorManager.Command]): Behavior[Command] =
     Behaviors.withTimers[Command](timers => {
-      Behaviors.setup[Command](context => new MongoOplogCollector(db, ops, timers, cursorActor, context))
+      Behaviors.setup[Command](context => new MongoOplogCollector(oplogDB, sourceDB, ops, timers, cursorActor, context))
     })
 
 
@@ -137,10 +168,14 @@ object MongoOplogCollector {
 
   case class Resume() extends Command
 
-  case class UpdateCursor() extends Command
+  case class Query(db: String, coll: String, id: String) extends Command
 
-  case class WrappedCursorResponse(resp: CursorManager.Response) extends Command
+  private case class UpdateCursor() extends Command
 
-  case class WrappedDumperResponse(resp: OplogDumper.Response) extends Command
+  private case class WrappedCursorResponse(resp: CursorManager.Response) extends Command
+
+  private case class WrappedDumperResponse(resp: OplogDumper.Response) extends Command
+
+  private case class WrappedReceptionistResponse(list: Receptionist.Listing) extends Command
 
 }

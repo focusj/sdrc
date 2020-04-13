@@ -1,4 +1,5 @@
 import OplogDumper.Doc
+import akka.actor.typed.receptionist.ServiceKey
 import akka.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors}
 import akka.actor.typed.{ActorRef, Behavior}
 import org.mongodb.scala.model.Filters
@@ -34,6 +35,8 @@ class OplogDumper(
 }
 
 object OplogDumper {
+
+  def DumperServiceKey(name: String) = ServiceKey[Command](name)
 
   def apply(db: MongoDatabase) = Behaviors.setup[OplogDumper.Command](context => new OplogDumper(db, context))
 
