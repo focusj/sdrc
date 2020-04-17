@@ -14,7 +14,11 @@ trait Configurable {
 
 case class OplogConf(after: BsonTimestamp, ops: List[String])
 
-case class Oplog(id: ObjectId, op: String, ns: String, ts: BsonTimestamp, doc: BsonDocument)
+case class Oplog(id: ObjectId, op: String, ns: String, ts: BsonTimestamp, doc: BsonDocument) {
+  def key(): String = {
+    ns + ":" + id.toHexString
+  }
+}
 
 object Sdrc extends App with Configurable {
 
@@ -25,19 +29,21 @@ object Sdrc extends App with Configurable {
     val oplogDb = getDb(config().getString("sdrc.collector.mongo.uri"),
       config().getString("sdrc.collector.mongo.database"))
 
+    val sourceDb = getDb(config().getString("sdrc.collector.mongo.uri"), "sdrc")
+
     val cursorActor = context.spawn(CursorManager(cursorDb), "cursor-actor")
 
-    val ops = config().getStringList("sdrc.collector.mongo.ops").asScala
-    val oplogActor = context.spawn(MongoOplogCollector(oplogDb, ops, cursorActor), "oplog-actor")
+    val ops = config().getStringList("sdrc.collector.mongo.ops").asScala.toSet
+    val oplogActor = context.spawn(Collector(oplogDb, sourceDb, ops, cursorActor), "oplog-actor")
 
-    oplogActor ! MongoOplogCollector.Start()
+    oplogActor ! Collector.Start()
 
     Behaviors.same
   }), "sdrc")
 
   new CountDownLatch(1).await()
 
-  private def getDb(address:String, dbName: String): MongoDatabase = {
+  private def getDb(address: String, dbName: String): MongoDatabase = {
     MongoClient(address).getDatabase(dbName)
   }
 

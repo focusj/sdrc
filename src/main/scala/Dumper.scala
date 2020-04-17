@@ -1,24 +1,24 @@
-import OplogDumper.Doc
+import Dumper.Doc
+import akka.actor.typed.receptionist.ServiceKey
 import akka.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors}
 import akka.actor.typed.{ActorRef, Behavior}
 import org.mongodb.scala.model.Filters
 import org.mongodb.scala.{Document, MongoDatabase}
 
 import scala.concurrent.Await
-import scala.concurrent.duration._
 
-class OplogDumper(
+class Dumper(
   db: MongoDatabase,
-  context: ActorContext[OplogDumper.Command]
-) extends AbstractBehavior[OplogDumper.Command](context) {
+  context: ActorContext[Dumper.Command]
+) extends AbstractBehavior[Dumper.Command](context) {
   private var state: Document = _
 
-  override def onMessage(msg: OplogDumper.Command): Behavior[OplogDumper.Command] = {
+  override def onMessage(msg: Dumper.Command): Behavior[Dumper.Command] = {
     msg match {
-      case OplogDumper.Set(oplog)   =>
+      case Dumper.Set(oplog)   =>
         val findRs = coll(oplog.ns).find(Filters.eq("_id", oplog.id)).head()
-        state = Await.result(findRs, 100.millis)
-      case OplogDumper.Get(replyTo) =>
+        state = Await.result(findRs, Global.MONGO_QUERY_TIMEOUT)
+      case Dumper.Get(replyTo) =>
         replyTo ! Doc(state)
     }
 
@@ -33,9 +33,11 @@ class OplogDumper(
 
 }
 
-object OplogDumper {
+object Dumper {
 
-  def apply(db: MongoDatabase) = Behaviors.setup[OplogDumper.Command](context => new OplogDumper(db, context))
+  def DumperServiceKey(name: String) = ServiceKey[Command](name)
+
+  def apply(db: MongoDatabase) = Behaviors.setup[Dumper.Command](context => new Dumper(db, context))
 
   sealed trait Command
 
