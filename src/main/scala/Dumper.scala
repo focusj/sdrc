@@ -6,7 +6,6 @@ import org.mongodb.scala.model.Filters
 import org.mongodb.scala.{Document, MongoDatabase}
 
 import scala.concurrent.Await
-import scala.concurrent.duration._
 
 class Dumper(
   db: MongoDatabase,
@@ -18,7 +17,7 @@ class Dumper(
     msg match {
       case Dumper.Set(oplog)   =>
         val findRs = coll(oplog.ns).find(Filters.eq("_id", oplog.id)).head()
-        state = Await.result(findRs, 100.millis)
+        state = Await.result(findRs, Global.MONGO_QUERY_TIMEOUT)
       case Dumper.Get(replyTo) =>
         replyTo ! Doc(state)
     }
