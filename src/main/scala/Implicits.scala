@@ -19,8 +19,8 @@ object Implicits {
           Right(doc.get("o2").get.asInstanceOf[BsonObjectId].getValue)
         case "d" | "i" =>
           Right(doc.get("o").get.asInstanceOf[BsonDocument].get("_id").asInstanceOf[BsonObjectId].getValue)
-        case _ =>
-          Left(new IllegalArgumentException("not support"))
+        case op =>
+          Left(new IllegalArgumentException(s"not supported op type: ${op}, doc: ${doc}"))
 
       }
     }

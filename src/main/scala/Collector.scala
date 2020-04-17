@@ -1,24 +1,22 @@
+import Implicits.MongoDocumentImplicits
 import akka.actor.typed.receptionist.Receptionist
 import akka.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors, TimerScheduler}
 import akka.actor.typed.{ActorRef, Behavior}
 import akka.util.Timeout
 import com.mongodb.CursorType
-import org.bson.BsonObjectId
 import org.mongodb.scala.bson.collection.Document
-import org.mongodb.scala.bson.{BsonDocument, BsonString, BsonTimestamp, ObjectId}
+import org.mongodb.scala.bson.{BsonDocument, BsonString, BsonTimestamp}
 import org.mongodb.scala.model.Filters
 import org.mongodb.scala.model.Filters.and
 import org.mongodb.scala.{MongoDatabase, Observable, Observer}
 
 import scala.concurrent.duration._
 
-import Implicits.MongoDocumentImplicits
-
 
 class Collector(
   oplogDB: MongoDatabase,
   sourceDB: MongoDatabase,
-  ops: Seq[String],
+  ops: Set[String],
   timers: TimerScheduler[Collector.Command],
   cursorActor: ActorRef[CursorManager.Command],
   context: ActorContext[Collector.Command]
@@ -67,7 +65,7 @@ class Collector(
 
         timers.startTimerAtFixedRate(UpdateCursor(), 1.second)
 
-        val oplogs = init(BsonTimestamp(cursor.ts.toInt, cursor.inc), ops)
+        val oplogs = init(BsonTimestamp(cursor.ts.toInt, cursor.inc), ops.toSeq)
 
         oplogs.subscribe(new Observer[Oplog] {
           override def onNext(oplog: Oplog): Unit = {
@@ -75,14 +73,14 @@ class Collector(
 
             // a dumper is a long lived actor, it should watch by this context
             // and discovered by this context to get its state.
-            val dumper = context.spawn(Dumper(sourceDB), idOfDumper(oplog))
+            val dumper = context.spawn(Dumper(sourceDB), oplog.key())
 
             // watch this dumper
             context.watch(dumper)
 
             // register this long live dumper
             // why not use children? TODO
-            context.system.receptionist ! Receptionist.Register(Dumper.DumperServiceKey(idOfDumper(oplog)), dumper)
+            context.system.receptionist ! Receptionist.Register(Dumper.DumperServiceKey(oplog.key()), dumper)
 
             dumper ! Dumper.Set(oplog)
 
@@ -104,10 +102,6 @@ class Collector(
     this
   }
 
-  def idOfDumper(oplog: Oplog) = {
-    oplog.ns + ":" + oplog.id.toHexString
-  }
-
   def init(from: BsonTimestamp, ops: Seq[String]): Observable[Oplog] = {
     val query = and(
       Filters.gt("ts", from),
@@ -120,31 +114,30 @@ class Collector(
       .cursorType(CursorType.Tailable)
       .noCursorTimeout(true)
       .withFilter(doc => nsFilter(doc))
-      .filter(opFilter)
+      .filter(opsFilter)
       .map(trans)
+      .filter(_.isDefined)
+      .map(_.get)
       .observeOn(scala.concurrent.ExecutionContext.global)
   }
 
-  private def trans(doc: Document) = {
+  private def trans(doc: Document): Option[Oplog] = {
     val op = doc.get("op").get.asInstanceOf[BsonString]
     val ns = doc.get("ns").get.asInstanceOf[BsonString]
     val ts = doc.get("ts").get.asInstanceOf[BsonTimestamp]
     val obj = doc.get("o").get.asInstanceOf[BsonDocument]
 
-    Oplog(idOfOplog(doc), op.getValue, ns.getValue, ts, obj)
-  }
-
-  private def idOfOplog(doc: Document): ObjectId = {
-    doc.op match {
-      case "u"       =>
-        doc.get("o2").get.asInstanceOf[BsonObjectId].getValue
-      case "d" | "i" =>
-        doc.get("o").get.asInstanceOf[BsonDocument].get("_id").asInstanceOf[BsonObjectId].getValue
+    doc.id match {
+      case Right(id) =>
+        Some(Oplog(id, op.getValue, ns.getValue, ts, obj))
+      case Left(ex)  =>
+        context.log.error("trans doc failed", ex)
+        None
     }
   }
 
-  private def opFilter(doc: Document): Boolean = {
-    ops.toSet.contains(doc.op)
+  private def opsFilter(doc: Document): Boolean = {
+    ops.contains(doc.op)
   }
 
   private def nsFilter(doc: Document) = {
@@ -154,7 +147,7 @@ class Collector(
 
 object Collector {
 
-  def apply(oplogDB: MongoDatabase, sourceDB: MongoDatabase, ops: Seq[String], cursorActor: ActorRef[CursorManager.Command]): Behavior[Command] =
+  def apply(oplogDB: MongoDatabase, sourceDB: MongoDatabase, ops: Set[String], cursorActor: ActorRef[CursorManager.Command]): Behavior[Command] =
     Behaviors.withTimers[Command](timers => {
       Behaviors.setup[Command](context => new Collector(oplogDB, sourceDB, ops, timers, cursorActor, context))
     })

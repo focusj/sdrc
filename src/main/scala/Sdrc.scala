@@ -14,7 +14,11 @@ trait Configurable {
 
 case class OplogConf(after: BsonTimestamp, ops: List[String])
 
-case class Oplog(id: ObjectId, op: String, ns: String, ts: BsonTimestamp, doc: BsonDocument)
+case class Oplog(id: ObjectId, op: String, ns: String, ts: BsonTimestamp, doc: BsonDocument) {
+  def key(): String = {
+    ns + ":" + id.toHexString
+  }
+}
 
 object Sdrc extends App with Configurable {
 
@@ -29,7 +33,7 @@ object Sdrc extends App with Configurable {
 
     val cursorActor = context.spawn(CursorManager(cursorDb), "cursor-actor")
 
-    val ops = config().getStringList("sdrc.collector.mongo.ops").asScala
+    val ops = config().getStringList("sdrc.collector.mongo.ops").asScala.toSet
     val oplogActor = context.spawn(Collector(oplogDb, sourceDb, ops, cursorActor), "oplog-actor")
 
     oplogActor ! Collector.Start()
