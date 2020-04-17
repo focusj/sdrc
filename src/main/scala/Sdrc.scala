@@ -30,9 +30,9 @@ object Sdrc extends App with Configurable {
     val cursorActor = context.spawn(CursorManager(cursorDb), "cursor-actor")
 
     val ops = config().getStringList("sdrc.collector.mongo.ops").asScala
-    val oplogActor = context.spawn(MongoOplogCollector(oplogDb, sourceDb, ops, cursorActor), "oplog-actor")
+    val oplogActor = context.spawn(Collector(oplogDb, sourceDb, ops, cursorActor), "oplog-actor")
 
-    oplogActor ! MongoOplogCollector.Start()
+    oplogActor ! Collector.Start()
 
     Behaviors.same
   }), "sdrc")
