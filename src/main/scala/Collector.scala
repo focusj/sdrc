@@ -10,9 +10,9 @@ import org.mongodb.scala.model.Filters
 import org.mongodb.scala.model.Filters.and
 import org.mongodb.scala.{MongoDatabase, Observable, Observer}
 
+import scala.collection.mutable
 import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, Future}
-import scala.util.{Failure, Success}
 
 
 class Collector(
@@ -29,7 +29,7 @@ class Collector(
   import akka.actor.typed.scaladsl.AskPattern._
 
   private val coll = oplogDB.getCollection("oplog.rs")
-
+  private val dumperRefs = mutable.HashMap.empty[String, ActorRef[Dumper.Command]]
   private var currentCursor: CursorManager.Cursor = _
 
   override def onMessage(
@@ -39,8 +39,6 @@ class Collector(
       context.messageAdapter(msg => WrappedCursorResponse(msg))
     val dumperAdapter: ActorRef[Dumper.Response] =
       context.messageAdapter(msg => WrappedDumperResponse(msg))
-    val receptionistAdapter: ActorRef[Receptionist.Listing] =
-      context.messageAdapter(msg => WrappedReceptionistResponse(msg))
 
     implicit val timeout: Timeout = 500.millis
     implicit val scheduler: Scheduler = context.system.scheduler
@@ -56,18 +54,12 @@ class Collector(
         cursorActor ! CursorManager.Update(currentCursor.ts, currentCursor.inc)
       case Query(Key(db, coll, id), replyTo)    =>
         val dumperKey = s"${db}.${coll}:${id}"
-        val serviceKey = Dumper.DumperServiceKey(dumperKey)
-        context.system.receptionist ! Receptionist.Find(serviceKey, receptionistAdapter)
-        val fu: Future[Receptionist.Listing] = context.system.receptionist.ask(ac => Receptionist.Find(serviceKey, ac))
-        fu.onComplete {
-          case Success(listing) =>
-            listing.allServiceInstances(Dumper.DumperServiceKey(listing.key.id)).headOption.foreach(dumper => {
-              val getRs: Future[Dumper.Response] = dumper.ask(Dumper.Get)
-              val doc = Await.result(getRs, 500.millis)
-              replyTo ! doc
-            })
-          case Failure(ex)      =>
-            context.log.error(s"[$dumperKey] not exists", ex)
+        dumperRefs.get(dumperKey) match {
+          case Some(dumper) =>
+            val getRs: Future[Dumper.Response] = dumper.ask(Dumper.Get)
+            val doc = Await.result(getRs, 500.millis)
+            replyTo ! doc
+          case None         =>
             replyTo ! Dumper.NoData
         }
       case WrappedReceptionistResponse(listing) =>
@@ -90,14 +82,10 @@ class Collector(
 
             // a dumper is a long lived actor, it should watch by this context
             // and discovered by this context to get its state.
-            val dumper = context.spawn(Dumper(sourceDB), oplog.key())
+            val dumper = dumperRefs.getOrElseUpdate(oplog.key(), context.spawn(Dumper(sourceDB), oplog.key()))
 
             // watch this dumper
-            context.watch(dumper)
-
-            // register this long live dumper
-            // why not use children? TODO
-            context.system.receptionist ! Receptionist.Register(Dumper.DumperServiceKey(oplog.key()), dumper)
+            context.watch(dumper) // TODO listen dumper stop event
 
             dumper ! Dumper.Set(oplog)
           }
