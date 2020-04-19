@@ -1,3 +1,5 @@
+import java.util.concurrent.CountDownLatch
+
 import Collector.Key
 import akka.actor.typed.scaladsl.Behaviors
 import akka.actor.typed.scaladsl.adapter._
@@ -7,7 +9,7 @@ import akka.http.scaladsl.Http.ServerBinding
 import akka.http.scaladsl.model.{ContentTypes, HttpEntity}
 import akka.http.scaladsl.server.Directives.{Segments, complete, get, path, _}
 import akka.http.scaladsl.server.Route
-import akka.stream.ActorMaterializer
+import akka.stream.Materializer
 import akka.util.Timeout
 import com.typesafe.config.{Config, ConfigFactory}
 import org.mongodb.scala.bson.{BsonDocument, BsonTimestamp, ObjectId}
@@ -36,7 +38,7 @@ class SdrcRoutes(dataActor: ActorRef[Collector.Command])(implicit system: ActorS
           val queryRs: Future[Dumper.Response] = dataActor.ask(Collector.Query(Key(db, coll, id), _))
           onSuccess(queryRs) {
             case Dumper.Doc(data) =>
-              complete(HttpEntity(ContentTypes.`text/plain(UTF-8)`, s"$data"))
+              complete(HttpEntity(ContentTypes.`application/json`, s"${data.toJson()}"))
             case Dumper.NoData    =>
               complete(HttpEntity(ContentTypes.`text/plain(UTF-8)`, s"not found data for: [$db/$coll/$id]"))
           }
@@ -56,17 +58,22 @@ case class Oplog(id: ObjectId, op: String, ns: String, ts: BsonTimestamp, doc: B
   }
 }
 
-object Server extends Configurable {
+object Sdrc extends Configurable {
 
   def main(args: Array[String]) {
-    val system: ActorSystem[Server.Command] =
-      ActorSystem(Server("localhost", 8080), "SdrcHttpServer")
+    val system: ActorSystem[Sdrc.Command] =
+      ActorSystem(Sdrc("localhost", 8080), "SdrcHttpServer")
+
+    val latch = new CountDownLatch(1)
+    latch.wait()
+
+    system.terminate()
   }
 
   def apply(host: String, port: Int): Behavior[Command] = Behaviors.setup { ctx =>
     implicit val system: ActorSystem[Nothing] = ctx.system
     implicit val untypedSystem: akka.actor.ActorSystem = ctx.system.toClassic
-    implicit val materializer: ActorMaterializer = ActorMaterializer()(ctx.system.toClassic)
+    implicit val materializer: Materializer = Materializer(ctx.system.toClassic)
     implicit val ec: ExecutionContextExecutor = concurrent.ExecutionContext.global
 
     val cursorDb = getDb(config().getString("sdrc.cursor.mongo.uri"),
