@@ -45,14 +45,14 @@ class Collector(
     implicit val ec: ExecutionContext = context.system.executionContext
 
     msg match {
-      case _: Start                             =>
+      case _: Start                          =>
         cursorActor ! CursorManager.Get(cursorAdapter)
-      case _: Stop                              =>
-      case _: Suspend                           =>
-      case _: Resume                            =>
-      case _: UpdateCursor                      =>
+      case _: Stop                           =>
+      case _: Suspend                        =>
+      case _: Resume                         =>
+      case _: UpdateCursor                   =>
         cursorActor ! CursorManager.Update(currentCursor.ts, currentCursor.inc)
-      case Query(Key(db, coll, id), replyTo)    =>
+      case Query(Key(db, coll, id), replyTo) =>
         val dumperKey = s"${db}.${coll}:${id}"
         dumperRefs.get(dumperKey) match {
           case Some(dumper) =>
@@ -62,14 +62,7 @@ class Collector(
           case None         =>
             replyTo ! Dumper.NoData
         }
-      case WrappedReceptionistResponse(listing) =>
-        val key = Dumper.DumperServiceKey(listing.key.id)
-        listing.allServiceInstances(key).headOption.foreach(dumper =>
-          dumper ! Dumper.Get(dumperAdapter)
-        )
-      case WrappedDumperResponse(data)          =>
-        context.log.info("query data: {}", data)
-      case _@WrappedCursorResponse(resp)        =>
+      case _@WrappedCursorResponse(resp)     =>
         val cursor = resp.asInstanceOf[CursorManager.Cursor]
 
         timers.startTimerAtFixedRate(UpdateCursor(), 1.second)
