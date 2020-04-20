@@ -1,7 +1,7 @@
 import Implicits.MongoDocumentImplicits
 import akka.actor.typed.receptionist.Receptionist
 import akka.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors, TimerScheduler}
-import akka.actor.typed.{ActorRef, Behavior}
+import akka.actor.typed.{ActorRef, Behavior, Scheduler}
 import akka.util.Timeout
 import com.mongodb.CursorType
 import org.mongodb.scala.bson.collection.Document
@@ -10,7 +10,9 @@ import org.mongodb.scala.model.Filters
 import org.mongodb.scala.model.Filters.and
 import org.mongodb.scala.{MongoDatabase, Observable, Observer}
 
+import scala.collection.mutable
 import scala.concurrent.duration._
+import scala.concurrent.{Await, ExecutionContext, Future}
 
 
 class Collector(
@@ -24,9 +26,10 @@ class Collector(
   extends AbstractBehavior[Collector.Command](context) {
 
   import Collector._
+  import akka.actor.typed.scaladsl.AskPattern._
 
   private val coll = oplogDB.getCollection("oplog.rs")
-
+  private val dumperRefs = mutable.HashMap.empty[String, ActorRef[Dumper.Command]]
   private var currentCursor: CursorManager.Cursor = _
 
   override def onMessage(
@@ -36,31 +39,30 @@ class Collector(
       context.messageAdapter(msg => WrappedCursorResponse(msg))
     val dumperAdapter: ActorRef[Dumper.Response] =
       context.messageAdapter(msg => WrappedDumperResponse(msg))
-    val receptionistAdapter: ActorRef[Receptionist.Listing] =
-      context.messageAdapter(msg => WrappedReceptionistResponse(msg))
 
-    implicit val timeout: Timeout = 3.seconds
+    implicit val timeout: Timeout = 500.millis
+    implicit val scheduler: Scheduler = context.system.scheduler
+    implicit val ec: ExecutionContext = context.system.executionContext
 
     msg match {
-      case _: Start                             =>
+      case _: Start                          =>
         cursorActor ! CursorManager.Get(cursorAdapter)
-      case _: Stop                              =>
-      case _: Suspend                           =>
-      case _: Resume                            =>
-      case _: UpdateCursor                      =>
+      case _: Stop                           =>
+      case _: Suspend                        =>
+      case _: Resume                         =>
+      case _: UpdateCursor                   =>
         cursorActor ! CursorManager.Update(currentCursor.ts, currentCursor.inc)
-      case Query(db, coll, id)                  =>
+      case Query(Key(db, coll, id), replyTo) =>
         val dumperKey = s"${db}.${coll}:${id}"
-        val serviceKey = Dumper.DumperServiceKey(dumperKey)
-        context.system.receptionist ! Receptionist.Find(serviceKey, receptionistAdapter)
-      case WrappedReceptionistResponse(listing) =>
-        val key = Dumper.DumperServiceKey(listing.key.id)
-        listing.allServiceInstances(key).headOption.foreach(dumper =>
-          dumper ! Dumper.Get(dumperAdapter)
-        )
-      case WrappedDumperResponse(data)          =>
-        context.log.info("query data: {}", data)
-      case _@WrappedCursorResponse(resp)        =>
+        dumperRefs.get(dumperKey) match {
+          case Some(dumper) =>
+            val getRs: Future[Dumper.Response] = dumper.ask(Dumper.Get)
+            val doc = Await.result(getRs, 500.millis)
+            replyTo ! doc
+          case None         =>
+            replyTo ! Dumper.NoData
+        }
+      case _@WrappedCursorResponse(resp)     =>
         val cursor = resp.asInstanceOf[CursorManager.Cursor]
 
         timers.startTimerAtFixedRate(UpdateCursor(), 1.second)
@@ -73,18 +75,12 @@ class Collector(
 
             // a dumper is a long lived actor, it should watch by this context
             // and discovered by this context to get its state.
-            val dumper = context.spawn(Dumper(sourceDB), oplog.key())
+            val dumper = dumperRefs.getOrElseUpdate(oplog.key(), context.spawn(Dumper(sourceDB), oplog.key()))
 
             // watch this dumper
-            context.watch(dumper)
-
-            // register this long live dumper
-            // why not use children? TODO
-            context.system.receptionist ! Receptionist.Register(Dumper.DumperServiceKey(oplog.key()), dumper)
+            context.watch(dumper) // TODO listen dumper stop event
 
             dumper ! Dumper.Set(oplog)
-
-            context.self ! Query("sdrc", "test", oplog.id.toHexString)
           }
 
           override def onError(e: Throwable): Unit = {
@@ -155,6 +151,8 @@ object Collector {
 
   sealed trait Command
 
+  sealed trait Response
+
   case class Start() extends Command
 
   case class Stop() extends Command
@@ -163,7 +161,9 @@ object Collector {
 
   case class Resume() extends Command
 
-  case class Query(db: String, coll: String, id: String) extends Command
+  case class Key(db: String, coll: String, id: String)
+
+  case class Query(key: Key, replyTo: ActorRef[Dumper.Response]) extends Command
 
   private case class UpdateCursor() extends Command
 

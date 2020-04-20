@@ -49,4 +49,6 @@ object Dumper {
 
   case class Doc(doc: Document) extends Response
 
+  case object NoData extends Response
+
 }
