@@ -75,7 +75,7 @@ class Collector(
 
             // a dumper is a long lived actor, it should watch by this context
             // and discovered by this context to get its state.
-            val dumper = dumperRefs.getOrElseUpdate(oplog.key(), context.spawn(Dumper(sourceDB), oplog.key()))
+            val dumper = dumperRefs.getOrElseUpdate(oplog.key(), context.spawn(Dumper(oplog.key(), sourceDB), oplog.key()))
 
             // watch this dumper
             context.watch(dumper) // TODO listen dumper stop event

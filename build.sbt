@@ -8,13 +8,16 @@ val akkaVersion = "2.6.4"
 val akkaHttpVersion = "10.1.11"
 
 libraryDependencies ++= Seq(
-  "com.typesafe.akka" %% "akka-actor-typed"       % akkaVersion,
-  "com.typesafe.akka" %% "akka-stream"            % akkaVersion,
-  "com.typesafe.akka" %% "akka-persistence-typed" % akkaVersion,
-  "com.typesafe.akka" %% "akka-http"              % akkaHttpVersion,
-  "org.mongodb.scala" %% "mongo-scala-driver"     % "2.9.0",
-  "org.apache.kafka"  %% "kafka"                  % "2.3.0",
-  "org.slf4j"         %  "slf4j-api"              % "1.7.28",
-  "org.slf4j"         %  "slf4j-simple"           % "1.7.28",
-  "ch.qos.logback"    %  "logback-classic"        % "1.2.3",
+  "com.typesafe.akka"         %% "akka-actor-typed"                 % akkaVersion,
+  "com.typesafe.akka"         %% "akka-stream"                      % akkaVersion,
+  "com.typesafe.akka"         %% "akka-persistence-typed"           % akkaVersion,
+  "com.typesafe.akka"         %% "akka-serialization-jackson"       % "2.6.4",
+  "com.typesafe.akka"         %% "akka-http"                        % akkaHttpVersion,
+  "org.mongodb.scala"         %% "mongo-scala-driver"               % "2.9.0",
+  "org.apache.kafka"          %% "kafka"                            % "2.3.0",
+  "org.slf4j"                 %  "slf4j-api"                        % "1.7.28",
+  "org.slf4j"                 %  "slf4j-simple"                     % "1.7.28",
+  "ch.qos.logback"            %  "logback-classic"                  % "1.2.3",
+  "org.iq80.leveldb"          %  "leveldb"                          % "0.12",
+  "org.fusesource.leveldbjni" %  "leveldbjni-all"                   % "1.8"
 )

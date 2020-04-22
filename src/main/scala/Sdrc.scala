@@ -1,5 +1,3 @@
-import java.util.concurrent.CountDownLatch
-
 import Collector.Key
 import akka.actor.typed.scaladsl.Behaviors
 import akka.actor.typed.scaladsl.adapter._
@@ -22,7 +20,7 @@ import scala.util.{Failure, Success}
 
 
 trait Configurable {
-  def config(): Config = ConfigFactory.load("sdrc")
+  def config(): Config = ConfigFactory.load()
 }
 
 class SdrcRoutes(dataActor: ActorRef[Collector.Command])(implicit system: ActorSystem[_]) {
@@ -64,10 +62,9 @@ object Sdrc extends Configurable {
     val system: ActorSystem[Sdrc.Command] =
       ActorSystem(Sdrc("localhost", 8080), "SdrcHttpServer")
 
-    val latch = new CountDownLatch(1)
-    latch.wait()
-
-    system.terminate()
+    //    val latch = new CountDownLatch(1)
+    //    latch.await()
+    //    system.terminate()
   }
 
   def apply(host: String, port: Int): Behavior[Command] = Behaviors.setup { ctx =>
@@ -137,7 +134,6 @@ object Sdrc extends Configurable {
   }
 
   sealed trait Command
-
 
   private final case class StartFailed(cause: Throwable) extends Command
 
