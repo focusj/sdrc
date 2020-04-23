@@ -25,7 +25,7 @@ class CursorManager(
     msg match {
       case Get(reply)                =>
         context.pipeToSelf(get) {
-          case Success(ts) => GetSuccess(Cursor(ts.getValue, ts.getInc), reply)
+          case Success(ts) => GetSuccess(Cursor(ts.getTime, ts.getInc), reply)
           case Failure(ex) => GetFailed(ex, reply)
         }
       case GetSuccess(cursor, reply) =>

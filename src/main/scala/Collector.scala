@@ -51,7 +51,11 @@ class Collector(
       case _: Suspend                        =>
       case _: Resume                         =>
       case _: UpdateCursor                   =>
-        cursorActor ! CursorManager.Update(currentCursor.ts, currentCursor.inc)
+        // TODO behavior changing to avoid cursor == null bug
+        // then get rid of this nullable checking
+        if (currentCursor != null) {
+          cursorActor ! CursorManager.Update(currentCursor.ts, currentCursor.inc)
+        }
       case Query(Key(db, coll, id), replyTo) =>
         val dumperKey = s"${db}.${coll}:${id}"
         dumperRefs.get(dumperKey) match {
@@ -72,11 +76,9 @@ class Collector(
         oplogs.subscribe(new Observer[Oplog] {
           override def onNext(oplog: Oplog): Unit = {
             currentCursor = CursorManager.Cursor(oplog.ts.getTime, oplog.ts.getInc)
-
             // a dumper is a long lived actor, it should watch by this context
             // and discovered by this context to get its state.
             val dumper = dumperRefs.getOrElseUpdate(oplog.key(), context.spawn(Dumper(oplog.key(), sourceDB), oplog.key()))
-
             // watch this dumper
             context.watch(dumper) // TODO listen dumper stop event
 

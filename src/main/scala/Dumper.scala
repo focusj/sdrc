@@ -1,8 +1,8 @@
 import akka.actor.typed.{ActorRef, Behavior}
 import akka.persistence.typed.PersistenceId
 import akka.persistence.typed.scaladsl.{Effect, EventSourcedBehavior}
+import org.mongodb.scala.MongoDatabase
 import org.mongodb.scala.model.Filters
-import org.mongodb.scala.{Document, MongoDatabase}
 
 import scala.concurrent.Await
 
@@ -15,15 +15,15 @@ class Dumper(db: MongoDatabase) {
       case Set(oplog)   =>
         val findRs = coll(oplog.ns).find(Filters.eq("_id", oplog.id)).head()
         val doc = Await.result(findRs, Global.MONGO_QUERY_TIMEOUT)
-        Effect.persist(Seted(doc))
+        Effect.persist(Seted(doc.toJson()))
       case Get(replyTo) =>
-        Effect.none.thenReply(replyTo)(_ => Doc(state.doc))
+        Effect.none.thenReply(replyTo)(_ => Doc(state.json))
     }
   }
 
   val eventHandler: (State, Event) => State = { (state, event) =>
     event match {
-      case Seted(doc) => state.copy(doc = doc)
+      case Seted(json) => state.copy(json = json)
     }
   }
 
@@ -56,13 +56,13 @@ object Dumper {
 
   case class Set(oplog: Oplog) extends Command
 
-  case class Seted(doc: Document) extends Event with Serializable
+  case class Seted(json: String) extends Event with Serializable
 
   case class Get(replyTo: ActorRef[Response]) extends Command
 
-  case class Doc(doc: Document) extends Response
+  case class Doc(json: String) extends Response
 
-  case class State(doc: Document)
+  case class State(json: String)
 
   case object NoData extends Response
 

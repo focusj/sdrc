@@ -36,7 +36,7 @@ class SdrcRoutes(dataActor: ActorRef[Collector.Command])(implicit system: ActorS
           val queryRs: Future[Dumper.Response] = dataActor.ask(Collector.Query(Key(db, coll, id), _))
           onSuccess(queryRs) {
             case Dumper.Doc(data) =>
-              complete(HttpEntity(ContentTypes.`application/json`, s"${data.toJson()}"))
+              complete(HttpEntity(ContentTypes.`application/json`, data))
             case Dumper.NoData    =>
               complete(HttpEntity(ContentTypes.`text/plain(UTF-8)`, s"not found data for: [$db/$coll/$id]"))
           }
