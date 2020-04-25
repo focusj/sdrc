@@ -14,7 +14,7 @@ import org.mongodb.scala.{MongoClient, MongoDatabase}
 
 import scala.collection.JavaConverters._
 import scala.concurrent.duration._
-import scala.concurrent.{ExecutionContextExecutor, Future}
+import scala.concurrent.{Await, ExecutionContextExecutor, Future}
 import scala.util.{Failure, Success}
 
 
@@ -53,9 +53,12 @@ object Sdrc extends Configurable {
     val system: ActorSystem[Sdrc.Command] =
       ActorSystem(Sdrc("localhost", 8080), "SdrcHttpServer")
 
-    //    val latch = new CountDownLatch(1)
-    //    latch.await()
-    //    system.terminate()
+    scala.sys.addShutdownHook {
+      system ! Stop
+      system.terminate()
+      Await.result(system.whenTerminated, 30.seconds)
+    }
+
   }
 
   def apply(host: String, port: Int): Behavior[Command] = Behaviors.setup { ctx =>
