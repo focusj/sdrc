@@ -21,6 +21,7 @@ class Collector(
   oplogDB: MongoDatabase,
   sourceDB: MongoDatabase,
   ops: Set[String],
+  nsPrefix: Set[String],
   timers: TimerScheduler[Collector.Command],
   cursorActor: ActorRef[CursorManager.Command],
   context: ActorContext[Collector.Command]
@@ -61,7 +62,7 @@ class Collector(
   def pullingLog(cursor: CursorManager.Cursor): Effect[Event, State] = {
     timers.startTimerAtFixedRate(UpdateCursor, 1.second)
 
-    val oplogs = init(BsonTimestamp(cursor.ts.toInt, cursor.inc), ops.toSeq)
+    val oplogs = init(BsonTimestamp(cursor.ts.toInt, cursor.inc), ops.toSeq, nsPrefix.toSeq)
 
     oplogs.subscribe(new Observer[Oplog] {
       override def onNext(oplog: Oplog): Unit = {
@@ -80,7 +81,7 @@ class Collector(
     Effect.none
   }
 
-  def init(from: BsonTimestamp, ops: Seq[String]): Observable[Oplog] = {
+  def init(from: BsonTimestamp, ops: Seq[String], nsPrefix: Seq[String]): Observable[Oplog] = {
     val query = and(
       Filters.gt("ts", from),
       Filters.in("op", ops: _*),
@@ -91,7 +92,7 @@ class Collector(
       .oplogReplay(true)
       .cursorType(CursorType.Tailable)
       .noCursorTimeout(true)
-      .withFilter(doc => nsFilter(doc))
+      .withFilter(doc => nsFilter(doc, nsPrefix))
       .filter(opsFilter)
       .map(trans)
       .filter(_.isDefined)
@@ -118,8 +119,8 @@ class Collector(
     ops.contains(doc.op)
   }
 
-  private def nsFilter(doc: Document) = {
-    doc.ns.startsWith("sdrc") // TODO fix this
+  private def nsFilter(doc: Document, nsPrefix: Seq[String]) = {
+    nsPrefix.map(ns => doc.ns.startsWith(ns)).reduceLeft((r, e) => r || e)
   }
 
   def updateCursor(): Effect[Event, State] = {
@@ -150,11 +151,11 @@ class Collector(
 
 object Collector {
 
-  def apply(oplogDB: MongoDatabase, sourceDB: MongoDatabase, ops: Set[String], cursorActor: ActorRef[CursorManager.Command]): Behavior[Command] = {
+  def apply(oplogDB: MongoDatabase, sourceDB: MongoDatabase, ops: Set[String], nsPrefix: Set[String], cursorActor: ActorRef[CursorManager.Command]): Behavior[Command] = {
 
     Behaviors.withTimers[Command](timers => {
       Behaviors.setup[Command](context => {
-        val collector = new Collector(oplogDB, sourceDB, ops, timers, cursorActor, context)
+        val collector = new Collector(oplogDB, sourceDB, ops, nsPrefix, timers, cursorActor, context)
         EventSourcedBehavior(
           persistenceId = PersistenceId.ofUniqueId("collector"),
           emptyState = State(mutable.HashMap.empty[String, ActorRef[Dumper.Command]]),
