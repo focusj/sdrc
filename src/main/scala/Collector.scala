@@ -38,9 +38,11 @@ class Collector(
     implicit val ec: ExecutionContext = context.system.executionContext
 
     command match {
-      case _: Start                          =>
+      case Start                             =>
         cursorActor ! CursorManager.Get(cursorAdapter)
         Effect.none
+      case Stop                              =>
+        Effect.stop()
       case AddDumper(key, ns, id)            =>
         Effect.persist(DumperAdded(key, ns, id)).thenRun(state => {
           state.dumpers.get(key).map(dumper => {
@@ -180,8 +182,6 @@ object Collector {
 
   case class DumperAdded(key: String, ns: String, id: String) extends Event
 
-  case class Start() extends Command
-
   case class AddDumper(key: String, ns: String, id: String) extends Command
 
   case class Query(key: Key, replyTo: ActorRef[Dumper.Response]) extends Command
@@ -193,5 +193,10 @@ object Collector {
   private case class WrappedDumperResponse(resp: Dumper.Response) extends Command
 
   private case class WrappedReceptionistResponse(list: Receptionist.Listing) extends Command
+
+  case object Start extends Command
+
+  case object Stop extends Command
+
 
 }
