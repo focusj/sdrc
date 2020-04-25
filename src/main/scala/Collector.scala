@@ -1,7 +1,9 @@
 import Implicits.MongoDocumentImplicits
 import akka.actor.typed.receptionist.Receptionist
-import akka.actor.typed.scaladsl.{AbstractBehavior, ActorContext, Behaviors, TimerScheduler}
+import akka.actor.typed.scaladsl.{ActorContext, Behaviors, TimerScheduler}
 import akka.actor.typed.{ActorRef, Behavior, Scheduler}
+import akka.persistence.typed.PersistenceId
+import akka.persistence.typed.scaladsl.{Effect, EventSourcedBehavior}
 import akka.util.Timeout
 import com.mongodb.CursorType
 import org.mongodb.scala.bson.collection.Document
@@ -22,43 +24,41 @@ class Collector(
   timers: TimerScheduler[Collector.Command],
   cursorActor: ActorRef[CursorManager.Command],
   context: ActorContext[Collector.Command]
-)
-  extends AbstractBehavior[Collector.Command](context) {
+) {
 
   import Collector._
   import akka.actor.typed.scaladsl.AskPattern._
 
-  private val coll = oplogDB.getCollection("oplog.rs")
-  private val dumperRefs = mutable.HashMap.empty[String, ActorRef[Dumper.Command]]
-  private var currentCursor: CursorManager.Cursor = _
-
-  override def onMessage(
-    msg: Collector.Command
-  ): Behavior[Collector.Command] = {
+  val commandHandler: (State, Command) => Effect[Event, State] = { (state, command) =>
     val cursorAdapter: ActorRef[CursorManager.Response] =
       context.messageAdapter(msg => WrappedCursorResponse(msg))
-    val dumperAdapter: ActorRef[Dumper.Response] =
-      context.messageAdapter(msg => WrappedDumperResponse(msg))
 
     implicit val timeout: Timeout = 500.millis
     implicit val scheduler: Scheduler = context.system.scheduler
     implicit val ec: ExecutionContext = context.system.executionContext
 
-    msg match {
+    command match {
       case _: Start                          =>
         cursorActor ! CursorManager.Get(cursorAdapter)
+        Effect.none
       case _: Stop                           =>
+        Effect.none
       case _: Suspend                        =>
+        Effect.none
       case _: Resume                         =>
+        Effect.none
+      case AddDumper(key, ns, id)            =>
+        Effect.persist(DumperAdded(key, ns, id))
       case _: UpdateCursor                   =>
         // TODO behavior changing to avoid cursor == null bug
         // then get rid of this nullable checking
         if (currentCursor != null) {
           cursorActor ! CursorManager.Update(currentCursor.ts, currentCursor.inc)
         }
+        Effect.none
       case Query(Key(db, coll, id), replyTo) =>
         val dumperKey = s"${db}.${coll}:${id}"
-        dumperRefs.get(dumperKey) match {
+        state.dumpers.get(dumperKey) match { //TODO
           case Some(dumper) =>
             val getRs: Future[Dumper.Response] = dumper.ask(Dumper.Get)
             val doc = Await.result(getRs, 500.millis)
@@ -66,6 +66,7 @@ class Collector(
           case None         =>
             replyTo ! Dumper.NoData
         }
+        Effect.none
       case _@WrappedCursorResponse(resp)     =>
         val cursor = resp.asInstanceOf[CursorManager.Cursor]
 
@@ -76,13 +77,7 @@ class Collector(
         oplogs.subscribe(new Observer[Oplog] {
           override def onNext(oplog: Oplog): Unit = {
             currentCursor = CursorManager.Cursor(oplog.ts.getTime, oplog.ts.getInc)
-            // a dumper is a long lived actor, it should watch by this context
-            // and discovered by this context to get its state.
-            val dumper = dumperRefs.getOrElseUpdate(oplog.key(), context.spawn(Dumper(oplog.key(), sourceDB), oplog.key()))
-            // watch this dumper
-            context.watch(dumper) // TODO listen dumper stop event
-
-            dumper ! Dumper.Set(oplog)
+            context.self ! AddDumper(oplog.key(), oplog.ns, oplog.id)
           }
 
           override def onError(e: Throwable): Unit = {
@@ -95,10 +90,22 @@ class Collector(
             // TODO how to finish
           }
         })
+        Effect.none
     }
-
-    this
   }
+
+  val eventHandler: (State, Event) => State = { (state, event) =>
+    event match {
+      case DumperAdded(key, ns, id) =>
+        val dumper = state.dumpers.getOrElseUpdate(key, context.spawn(Dumper(key, sourceDB), key))
+        context.watch(dumper)
+        dumper ! Dumper.Set(ns, id)
+        state
+    }
+  }
+
+  private val coll = oplogDB.getCollection("oplog.rs")
+  private var currentCursor: CursorManager.Cursor = _
 
   def init(from: BsonTimestamp, ops: Seq[String]): Observable[Oplog] = {
     val query = and(
@@ -127,7 +134,7 @@ class Collector(
 
     doc.id match {
       case Right(id) =>
-        Some(Oplog(id, op.getValue, ns.getValue, ts, obj))
+        Some(Oplog(id.toHexString, op.getValue, ns.getValue, ts, obj))
       case Left(ex)  =>
         context.log.error("trans doc failed", ex)
         None
@@ -145,15 +152,40 @@ class Collector(
 
 object Collector {
 
-  def apply(oplogDB: MongoDatabase, sourceDB: MongoDatabase, ops: Set[String], cursorActor: ActorRef[CursorManager.Command]): Behavior[Command] =
+  def apply(oplogDB: MongoDatabase, sourceDB: MongoDatabase, ops: Set[String], cursorActor: ActorRef[CursorManager.Command]): Behavior[Command] = {
+
     Behaviors.withTimers[Command](timers => {
-      Behaviors.setup[Command](context => new Collector(oplogDB, sourceDB, ops, timers, cursorActor, context))
+      Behaviors.setup[Command](context => {
+        val collector = new Collector(oplogDB, sourceDB, ops, timers, cursorActor, context)
+        EventSourcedBehavior(
+          persistenceId = PersistenceId.ofUniqueId("collector"),
+          emptyState = State(mutable.HashMap.empty[String, ActorRef[Dumper.Command]]),
+          commandHandler = collector.commandHandler,
+          eventHandler = collector.eventHandler
+        )
+      })
     })
 
+  }
 
   sealed trait Command
 
   sealed trait Response
+
+  sealed trait Event extends Serializable
+
+  case class Oplog(id: String, op: String, ns: String, ts: BsonTimestamp, doc: BsonDocument) {
+    def key(): String = {
+      ns + ":" + id
+    }
+  }
+
+
+  case class Key(db: String, coll: String, id: String)
+
+  case class State(dumpers: mutable.HashMap[String, ActorRef[Dumper.Command]])
+
+  case class DumperAdded(key: String, ns: String, id: String) extends Event
 
   case class Start() extends Command
 
@@ -163,7 +195,7 @@ object Collector {
 
   case class Resume() extends Command
 
-  case class Key(db: String, coll: String, id: String)
+  case class AddDumper(key: String, ns: String, id: String) extends Command
 
   case class Query(key: Key, replyTo: ActorRef[Dumper.Response]) extends Command
 

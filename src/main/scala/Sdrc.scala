@@ -48,14 +48,6 @@ class SdrcRoutes(dataActor: ActorRef[Collector.Command])(implicit system: ActorS
     }
 }
 
-case class OplogConf(after: BsonTimestamp, ops: List[String])
-
-case class Oplog(id: ObjectId, op: String, ns: String, ts: BsonTimestamp, doc: BsonDocument) {
-  def key(): String = {
-    ns + ":" + id.toHexString
-  }
-}
-
 object Sdrc extends Configurable {
 
   def main(args: Array[String]) {
