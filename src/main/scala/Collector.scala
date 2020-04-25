@@ -41,17 +41,14 @@ class Collector(
       case _: Start                          =>
         cursorActor ! CursorManager.Get(cursorAdapter)
         Effect.none
-      case _: Stop                           =>
-        Effect.none
-      case _: Suspend                        =>
-        Effect.none
-      case _: Resume                         =>
-        Effect.none
       case AddDumper(key, ns, id)            =>
-        Effect.persist(DumperAdded(key, ns, id))
+        Effect.persist(DumperAdded(key, ns, id)).thenRun(state => {
+          state.dumpers.get(key).map(dumper => {
+            context.watch(dumper)
+            dumper ! Dumper.Set(ns, id)
+          })
+        })
       case _: UpdateCursor                   =>
-        // TODO behavior changing to avoid cursor == null bug
-        // then get rid of this nullable checking
         if (currentCursor != null) {
           cursorActor ! CursorManager.Update(currentCursor.ts, currentCursor.inc)
         }
@@ -82,12 +79,10 @@ class Collector(
 
           override def onError(e: Throwable): Unit = {
             context.log.error("{}", e)
-            // TODO error handling
           }
 
           override def onComplete(): Unit = {
-            context.log.info("consuming oplog done")
-            // TODO how to finish
+            context.log.info("oplog collector done")
           }
         })
         Effect.none
@@ -97,9 +92,7 @@ class Collector(
   val eventHandler: (State, Event) => State = { (state, event) =>
     event match {
       case DumperAdded(key, ns, id) =>
-        val dumper = state.dumpers.getOrElseUpdate(key, context.spawn(Dumper(key, sourceDB), key))
-        context.watch(dumper)
-        dumper ! Dumper.Set(ns, id)
+        state.dumpers.getOrElseUpdate(key, context.spawn(Dumper(key, sourceDB), key))
         state
     }
   }
@@ -188,12 +181,6 @@ object Collector {
   case class DumperAdded(key: String, ns: String, id: String) extends Event
 
   case class Start() extends Command
-
-  case class Stop() extends Command
-
-  case class Suspend() extends Command
-
-  case class Resume() extends Command
 
   case class AddDumper(key: String, ns: String, id: String) extends Command
 
