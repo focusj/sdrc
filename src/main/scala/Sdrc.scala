@@ -1,5 +1,3 @@
-import java.util.concurrent.CountDownLatch
-
 import Collector.Key
 import akka.actor.typed.scaladsl.Behaviors
 import akka.actor.typed.scaladsl.adapter._
@@ -22,7 +20,7 @@ import scala.util.{Failure, Success}
 
 
 trait Configurable {
-  def config(): Config = ConfigFactory.load("sdrc")
+  def config(): Config = ConfigFactory.load()
 }
 
 class SdrcRoutes(dataActor: ActorRef[Collector.Command])(implicit system: ActorSystem[_]) {
@@ -38,7 +36,7 @@ class SdrcRoutes(dataActor: ActorRef[Collector.Command])(implicit system: ActorS
           val queryRs: Future[Dumper.Response] = dataActor.ask(Collector.Query(Key(db, coll, id), _))
           onSuccess(queryRs) {
             case Dumper.Doc(data) =>
-              complete(HttpEntity(ContentTypes.`application/json`, s"${data.toJson()}"))
+              complete(HttpEntity(ContentTypes.`application/json`, data))
             case Dumper.NoData    =>
               complete(HttpEntity(ContentTypes.`text/plain(UTF-8)`, s"not found data for: [$db/$coll/$id]"))
           }
@@ -50,24 +48,15 @@ class SdrcRoutes(dataActor: ActorRef[Collector.Command])(implicit system: ActorS
     }
 }
 
-case class OplogConf(after: BsonTimestamp, ops: List[String])
-
-case class Oplog(id: ObjectId, op: String, ns: String, ts: BsonTimestamp, doc: BsonDocument) {
-  def key(): String = {
-    ns + ":" + id.toHexString
-  }
-}
-
 object Sdrc extends Configurable {
 
   def main(args: Array[String]) {
     val system: ActorSystem[Sdrc.Command] =
       ActorSystem(Sdrc("localhost", 8080), "SdrcHttpServer")
 
-    val latch = new CountDownLatch(1)
-    latch.wait()
-
-    system.terminate()
+    //    val latch = new CountDownLatch(1)
+    //    latch.await()
+    //    system.terminate()
   }
 
   def apply(host: String, port: Int): Behavior[Command] = Behaviors.setup { ctx =>
@@ -88,7 +77,7 @@ object Sdrc extends Configurable {
 
     val ops = config().getStringList("sdrc.collector.mongo.ops").asScala.toSet
     val oplogActor = ctx.spawn(Collector(oplogDb, sourceDb, ops, cursorActor), "oplog-actor")
-    oplogActor ! Collector.Start()
+    oplogActor ! Collector.Start
 
     val serverBinding: Future[Http.ServerBinding] =
       Http.apply().bindAndHandle(new SdrcRoutes(oplogActor).route, host, port)
@@ -137,7 +126,6 @@ object Sdrc extends Configurable {
   }
 
   sealed trait Command
-
 
   private final case class StartFailed(cause: Throwable) extends Command
 
