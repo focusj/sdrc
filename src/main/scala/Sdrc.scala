@@ -77,7 +77,7 @@ object Sdrc extends Configurable {
 
     val ops = config().getStringList("sdrc.collector.mongo.ops").asScala.toSet
     val oplogActor = ctx.spawn(Collector(oplogDb, sourceDb, ops, cursorActor), "oplog-actor")
-    oplogActor ! Collector.Start()
+    oplogActor ! Collector.Start
 
     val serverBinding: Future[Http.ServerBinding] =
       Http.apply().bindAndHandle(new SdrcRoutes(oplogActor).route, host, port)

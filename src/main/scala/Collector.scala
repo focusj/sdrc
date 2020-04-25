@@ -13,8 +13,8 @@ import org.mongodb.scala.model.Filters.and
 import org.mongodb.scala.{MongoDatabase, Observable, Observer}
 
 import scala.collection.mutable
+import scala.concurrent.ExecutionContext
 import scala.concurrent.duration._
-import scala.concurrent.{Await, ExecutionContext, Future}
 
 
 class Collector(
@@ -27,7 +27,6 @@ class Collector(
 ) {
 
   import Collector._
-  import akka.actor.typed.scaladsl.AskPattern._
 
   val commandHandler: (State, Command) => Effect[Event, State] = { (state, command) =>
     val cursorAdapter: ActorRef[CursorManager.Response] =
@@ -50,26 +49,22 @@ class Collector(
             dumper ! Dumper.Set(ns, id)
           })
         })
-      case _: UpdateCursor                   =>
+      case UpdateCursor                      =>
         if (currentCursor != null) {
           cursorActor ! CursorManager.Update(currentCursor.ts, currentCursor.inc)
         }
         Effect.none
       case Query(Key(db, coll, id), replyTo) =>
         val dumperKey = s"${db}.${coll}:${id}"
-        state.dumpers.get(dumperKey) match { //TODO
-          case Some(dumper) =>
-            val getRs: Future[Dumper.Response] = dumper.ask(Dumper.Get)
-            val doc = Await.result(getRs, 500.millis)
-            replyTo ! doc
-          case None         =>
-            replyTo ! Dumper.NoData
+        state.dumpers.get(dumperKey) match {
+          case Some(dumper) => dumper ! Dumper.Get(replyTo)
+          case None         => replyTo ! Dumper.NoData
         }
         Effect.none
       case _@WrappedCursorResponse(resp)     =>
         val cursor = resp.asInstanceOf[CursorManager.Cursor]
 
-        timers.startTimerAtFixedRate(UpdateCursor(), 1.second)
+        timers.startTimerAtFixedRate(UpdateCursor, 1.second)
 
         val oplogs = init(BsonTimestamp(cursor.ts.toInt, cursor.inc), ops.toSeq)
 
@@ -186,8 +181,6 @@ object Collector {
 
   case class Query(key: Key, replyTo: ActorRef[Dumper.Response]) extends Command
 
-  private case class UpdateCursor() extends Command
-
   private case class WrappedCursorResponse(resp: CursorManager.Response) extends Command
 
   private case class WrappedDumperResponse(resp: Dumper.Response) extends Command
@@ -197,6 +190,8 @@ object Collector {
   case object Start extends Command
 
   case object Stop extends Command
+
+  private case object UpdateCursor extends Command
 
 
 }
