@@ -21,12 +21,16 @@ class Collector(
   oplogDB: MongoDatabase,
   sourceDB: MongoDatabase,
   ops: Set[String],
+  nsPrefix: Set[String],
   timers: TimerScheduler[Collector.Command],
   cursorActor: ActorRef[CursorManager.Command],
   context: ActorContext[Collector.Command]
 ) {
 
   import Collector._
+
+  private val coll = oplogDB.getCollection("oplog.rs")
+  private var currentCursor: CursorManager.Cursor = _
 
   val commandHandler: (State, Command) => Effect[Event, State] = { (state, command) =>
     val cursorAdapter: ActorRef[CursorManager.Response] =
@@ -37,55 +41,16 @@ class Collector(
     implicit val ec: ExecutionContext = context.system.executionContext
 
     command match {
-      case Start                             =>
+      case Start                         =>
         cursorActor ! CursorManager.Get(cursorAdapter)
         Effect.none
-      case Stop                              =>
-        Effect.stop()
-      case AddDumper(key, ns, id)            =>
-        Effect.persist(DumperAdded(key, ns, id)).thenRun(state => {
-          state.dumpers.get(key).map(dumper => {
-            context.watch(dumper)
-            dumper ! Dumper.Set(ns, id)
-          })
-        })
-      case UpdateCursor                      =>
-        if (currentCursor != null) {
-          cursorActor ! CursorManager.Update(currentCursor.ts, currentCursor.inc)
-        }
-        Effect.none
-      case Query(Key(db, coll, id), replyTo) =>
-        val dumperKey = s"${db}.${coll}:${id}"
-        state.dumpers.get(dumperKey) match {
-          case Some(dumper) => dumper ! Dumper.Get(replyTo)
-          case None         => replyTo ! Dumper.NoData
-        }
-        Effect.none
-      case _@WrappedCursorResponse(resp)     =>
-        val cursor = resp.asInstanceOf[CursorManager.Cursor]
-
-        timers.startTimerAtFixedRate(UpdateCursor, 1.second)
-
-        val oplogs = init(BsonTimestamp(cursor.ts.toInt, cursor.inc), ops.toSeq)
-
-        oplogs.subscribe(new Observer[Oplog] {
-          override def onNext(oplog: Oplog): Unit = {
-            currentCursor = CursorManager.Cursor(oplog.ts.getTime, oplog.ts.getInc)
-            context.self ! AddDumper(oplog.key(), oplog.ns, oplog.id)
-          }
-
-          override def onError(e: Throwable): Unit = {
-            context.log.error("{}", e)
-          }
-
-          override def onComplete(): Unit = {
-            context.log.info("oplog collector done")
-          }
-        })
-        Effect.none
+      case Stop                          => Effect.stop()
+      case AddDumper(key, ns, id)        => addDumper(key, ns, id)
+      case UpdateCursor                  => updateCursor()
+      case Query(key, replyTo)           => query(key, replyTo, state)
+      case _@WrappedCursorResponse(resp) => pullingLog(resp.asInstanceOf[CursorManager.Cursor])
     }
   }
-
   val eventHandler: (State, Event) => State = { (state, event) =>
     event match {
       case DumperAdded(key, ns, id) =>
@@ -94,10 +59,29 @@ class Collector(
     }
   }
 
-  private val coll = oplogDB.getCollection("oplog.rs")
-  private var currentCursor: CursorManager.Cursor = _
+  def pullingLog(cursor: CursorManager.Cursor): Effect[Event, State] = {
+    timers.startTimerAtFixedRate(UpdateCursor, 1.second)
 
-  def init(from: BsonTimestamp, ops: Seq[String]): Observable[Oplog] = {
+    val oplogs = init(BsonTimestamp(cursor.ts.toInt, cursor.inc), ops.toSeq, nsPrefix.toSeq)
+
+    oplogs.subscribe(new Observer[Oplog] {
+      override def onNext(oplog: Oplog): Unit = {
+        currentCursor = CursorManager.Cursor(oplog.ts.getTime, oplog.ts.getInc)
+        context.self ! AddDumper(oplog.key(), oplog.ns, oplog.id)
+      }
+
+      override def onError(e: Throwable): Unit = {
+        context.log.error("{}", e)
+      }
+
+      override def onComplete(): Unit = {
+        context.log.info("oplog collector done")
+      }
+    })
+    Effect.none
+  }
+
+  def init(from: BsonTimestamp, ops: Seq[String], nsPrefix: Seq[String]): Observable[Oplog] = {
     val query = and(
       Filters.gt("ts", from),
       Filters.in("op", ops: _*),
@@ -108,7 +92,7 @@ class Collector(
       .oplogReplay(true)
       .cursorType(CursorType.Tailable)
       .noCursorTimeout(true)
-      .withFilter(doc => nsFilter(doc))
+      .withFilter(doc => nsFilter(doc, nsPrefix))
       .filter(opsFilter)
       .map(trans)
       .filter(_.isDefined)
@@ -135,18 +119,43 @@ class Collector(
     ops.contains(doc.op)
   }
 
-  private def nsFilter(doc: Document) = {
-    doc.ns.startsWith("sdrc") // TODO fix this
+  private def nsFilter(doc: Document, nsPrefix: Seq[String]) = {
+    nsPrefix.map(ns => doc.ns.startsWith(ns)).reduceLeft((r, e) => r || e)
+  }
+
+  def updateCursor(): Effect[Event, State] = {
+    if (currentCursor != null) {
+      cursorActor ! CursorManager.Update(currentCursor.ts, currentCursor.inc)
+    }
+    Effect.none
+  }
+
+  def addDumper(key: String, ns: String, id: String): Effect[Event, State] = {
+    Effect.persist(DumperAdded(key, ns, id)).thenRun(state => {
+      state.dumpers.get(key).map(dumper => {
+        context.watch(dumper)
+        dumper ! Dumper.Set(ns, id)
+      })
+    })
+  }
+
+  def query(key: Key, replyTo: ActorRef[Dumper.Response], state: State): Effect[Event, State] = {
+    val dumperKey = s"${key.db}.${key.coll}:${key.id}"
+    state.dumpers.get(dumperKey) match {
+      case Some(dumper) => dumper ! Dumper.Get(replyTo)
+      case None         => replyTo ! Dumper.NoData
+    }
+    Effect.none
   }
 }
 
 object Collector {
 
-  def apply(oplogDB: MongoDatabase, sourceDB: MongoDatabase, ops: Set[String], cursorActor: ActorRef[CursorManager.Command]): Behavior[Command] = {
+  def apply(oplogDB: MongoDatabase, sourceDB: MongoDatabase, ops: Set[String], nsPrefix: Set[String], cursorActor: ActorRef[CursorManager.Command]): Behavior[Command] = {
 
     Behaviors.withTimers[Command](timers => {
       Behaviors.setup[Command](context => {
-        val collector = new Collector(oplogDB, sourceDB, ops, timers, cursorActor, context)
+        val collector = new Collector(oplogDB, sourceDB, ops, nsPrefix, timers, cursorActor, context)
         EventSourcedBehavior(
           persistenceId = PersistenceId.ofUniqueId("collector"),
           emptyState = State(mutable.HashMap.empty[String, ActorRef[Dumper.Command]]),

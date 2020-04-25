@@ -10,7 +10,6 @@ import akka.http.scaladsl.server.Route
 import akka.stream.Materializer
 import akka.util.Timeout
 import com.typesafe.config.{Config, ConfigFactory}
-import org.mongodb.scala.bson.{BsonDocument, BsonTimestamp, ObjectId}
 import org.mongodb.scala.{MongoClient, MongoDatabase}
 
 import scala.collection.JavaConverters._
@@ -76,7 +75,8 @@ object Sdrc extends Configurable {
     val cursorActor = ctx.spawn(CursorManager(cursorDb), "cursor-actor")
 
     val ops = config().getStringList("sdrc.collector.mongo.ops").asScala.toSet
-    val oplogActor = ctx.spawn(Collector(oplogDb, sourceDb, ops, cursorActor), "oplog-actor")
+    val nsPrefix = config().getStringList("sdrc.collector.mongo.ns-prefix").asScala.toSet
+    val oplogActor = ctx.spawn(Collector(oplogDb, sourceDb, ops, nsPrefix, cursorActor), "oplog-actor")
     oplogActor ! Collector.Start
 
     val serverBinding: Future[Http.ServerBinding] =
